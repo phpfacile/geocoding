@@ -1,0 +1,17 @@
+<?php
+return [
+    'geocoding' => [
+        'geocoders' => [
+            'geonames' => [
+                'username' => '<replace with geonames username>',
+            ],
+            'nominatim' => [
+                'rootUrl' => 'https://nominatim.openstreetmap.org',
+                'userAgent' => '<replace with a user-agent>',
+            ]
+        ],
+        'cache' => [
+            'cache_dir' => __DIR__.'/../cache/geocoding',
+        ]
+    ]
+];
