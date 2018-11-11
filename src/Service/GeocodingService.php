@@ -18,6 +18,14 @@ use Zend\Cache\Psr\SimpleCache\SimpleCacheDecorator;
 
 class GeocodingService
 {
+    const ADDRESS_TYPE_PLACE    = 'place';
+    const ADDRESS_TYPE_LOCATION = 'location';
+
+    /**
+     * Array of instance of geocoder (ex: one for nomatim, onr for geonames, etc)
+     *
+     * @var
+     */
     protected $geocoders = [];
 
     // Retrieved from https://github.com/rupinder1133/country-codes-to-timezones-mapping/blob/master/cc%20to%20tz%20PHP.txt (no license defined and content validity not checked)
@@ -252,6 +260,8 @@ class GeocodingService
             $httpClient = new Guzzle6HttpClient();
         }
 
+        $ttl = 30*24*3600;
+
         foreach ($providersCfg as $providerName => $providerCfg) {
             $provider = null;
             switch ($providerName) {
@@ -272,7 +282,7 @@ class GeocodingService
                     'name' => 'filesystem',
                     'options' => [
                         'cache_dir' => $cacheDir.'/'.$providerName,
-                        'ttl' => 3*24*3600
+                        'ttl' => $ttl,
                     ]
                 ],
                 'plugins' => [
@@ -293,7 +303,7 @@ class GeocodingService
             $perItemTTL = null;
             $capabilities = $storage->getCapabilities();
             if ($capabilities->getStaticTtl() && (0 < $capabilities->getMinTtl())) {
-                $perItemTTL = 3*24*3600;
+                $perItemTTL = $ttl;
             }
 
             $provideCache = new ProviderCache($provider, $cache, $perItemTTL);
@@ -310,13 +320,19 @@ class GeocodingService
      *
      * @return StdClass[]
      */
-    public function getLocationsByAddress($addressFull)
+    public function getLocationsByAddress($addressFull, $locale = 'fr', $limit = 10)
     {
+        $preferredProvider = 'nominatim';
+
         // For "addresses" location "nominatim" seems to be the best choice
-        if (false === array_key_exists('nominatim', $this->geocoders)) {
-            throw new \Exception('No nominatim provider configured');
+        if (false === array_key_exists($preferredProvider, $this->geocoders)) {
+            throw new \Exception('No '.$preferredProvider.' provider configured');
         }
-        $addresses = $this->geocoders['nominatim']->geocodeQuery(GeocodeQuery::create($addressFull));
+
+        $query = GeocodeQuery::create($addressFull);
+        $query = $query->withLocale($locale);
+        $query = $query->withLimit($limit);
+        $addresses = $this->geocoders[$preferredProvider]->geocodeQuery($query);
 
         return self::getGeocodedAdressesAsStdClassArray($addresses);
     }
@@ -332,32 +348,37 @@ class GeocodingService
      *
      * @return StdClass[]
      */
-    public function getPlacesByCountryAndPlaceName($countryName, $placeName, $postalCode = '', $locale = '')
+    public function getPlacesByCountryAndPlaceName($countryName, $placeName, $postalCode = null, $locale = 'fr', $limit = 10, $filterPlaces = true)
     {
+        // $preferedProvider = 'geonames';
+        $preferredProvider = 'nominatim';
+
         $addressFull = trim($placeName).', '.trim($countryName);
         if (strlen($postalCode) > 0) {
             $addressFull = trim($postalCode).' '.$addressFull;
         }
 
-        // $preferedProvider = 'geonames';
-        $preferredProvider = 'nominatim';
-
         if (false === array_key_exists($preferredProvider, $this->geocoders)) {
             throw new \Exception('No '.$preferredProvider.' provider configured');
         }
-        $addresses = $this->geocoders[$preferredProvider]->geocodeQuery(GeocodeQuery::create($addressFull));
+        $query = GeocodeQuery::create($addressFull);
+        $query = $query->withLocale($locale);
+        $query = $query->withLimit($limit);
+        $addresses = $this->geocoders[$preferredProvider]->geocodeQuery($query);
 
-        return self::getGeocodedPlacesAsStdClassArray($addresses);
+        return self::getGeocodedPlacesAsStdClassArray($addresses, $filterPlaces);
     }
 
-    protected static function getGeocodedPlacesAsStdClassArray($addresses)
+    protected static function getGeocodedPlacesAsStdClassArray($addresses, $filterPlaces = true)
     {
-        return self::getGeocodedAdressesAsStdClassArray($addresses, 'place');
+        return self::getGeocodedAdressesAsStdClassArray($addresses, self::ADDRESS_TYPE_PLACE, $filterPlaces);
     }
 
-    protected static function getGeocodedAdressesAsStdClassArray($addresses, $addressType = 'location')
+    protected static function getGeocodedAdressesAsStdClassArray($addresses, $addressType = self::ADDRESS_TYPE_LOCATION, $filterPlaces = true)
     {
         $locations = [];
+
+        $previousAddress = null;
 
         foreach ($addresses as $address) {
             $location = new \StdClass();
@@ -370,55 +391,110 @@ class GeocodingService
                     // $address->getFCLName(); // "city, village,...", "spot, building, farm"
                     break;
                 case 'nominatim':
-                    $location->idProvider = $address->getOSMId();
-                    $location->name       = $address->getDisplayName();
+                    // Do we have to ignore this address? Tricky question
+                    // Ex: With 'La Rochelle', 'France'
+                    // The 2 first results are:
+                    // * La Rochelle, Charente-Maritime, Nouvelle-Aquitaine, France métropolitaine, 17000, France
+                    // * La Rochelle, Charente-Maritime, Nouvelle-Aquitaine, France métropolitaine, France
+                    // Here we have to ignore the second one... but we can't ignore all addresses without postal code
+                    // for instance, in case of 'Paris', 'France' the 2 first results have no postal code
+                    // and as long as we are not interested in "arrondissements", the 1st result is the one
+                    // we expect (dispite there is no postal code)
+                    $ignoreAddress = false;
+                    if ((true === $filterPlaces) && (self::ADDRESS_TYPE_PLACE === $addressType)) {
+                        if (true === in_array($address->getType(), ['land_area'])) {
+                            $ignoreAddress = true;
+                        } else if (null !== $previousAddress) {
+                            // Is it the same place as the previous one ?
+                            // Unfortunately this test can not be regarded as fully reliable
+                            $samePlace = true;
+                            if (count($address->getAdminLevels()) === count($previousAddress->getAdminLevels())) {
+                                $previousAdminLevels = $previousAddress->getAdminLevels();
+                                foreach ($address->getAdminLevels() as $idx => $adminLevel) {
+                                    if ($adminLevel->getLevel() !== $previousAdminLevels->get($idx)->getLevel()) {
+                                        $samePlace = false;
+                                        break;
+                                    }
+                                    // Unfortunately adminLevel code is empty so we have to rely on name
+                                    if ($adminLevel->getName() !== $previousAdminLevels->get($idx)->getName()) {
+                                        $samePlace = false;
+                                        break;
+                                    }
+                                    // If ever, adminLevel code is in fact set
+                                    if ($adminLevel->getCode() !== $previousAdminLevels->get($idx)->getCode()) {
+                                        $samePlace = false;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                $samePlace = false;
+                            }
+                            // If they are the same we only keep the previous one
+                            if (true === $samePlace) $ignoreAddress = true;
+                        }
+                    }
 
-                    $location->custom              = new \StdClass();
-                    $location->custom->attribution = $address->getAttribution();
-                    $location->custom->class       = $address->getClass();
-                    $location->custom->osmType     = $address->getOSMType();
-                    $location->custom->type        = $address->getType();
+                    if (false === $ignoreAddress) {
+                        $location->idProvider = $address->getOSMId();
+                        $location->name       = $address->getDisplayName();
+
+                        $location->custom              = new \StdClass();
+                        $location->custom->attribution = $address->getAttribution();
+                        $location->custom->class       = $address->getClass();
+                        $location->custom->osmType     = $address->getOSMType();
+                        $location->custom->type        = $address->getType();
+                    }
                     break;
                 default:
                     throw new \Exception('Unsupported provider ['.$address->getProvidedBy().']');
             }
 
-            // $adminLevels = $address->getAdminLevels();
-            // var_dump($location->name);
-            // foreach ($adminLevels as $adminLevel) var_dump($adminLevel);
+            if (false === $ignoreAddress) {
+                /*
+                                   +----------+-----------+
+                                   | geonames | nominatim |
+                    +--------------+----------+-----------+
+                    | streetNumber |    ?     |     ?     |
+                    | streetName   | not set  |    set    |
+                    | postalCode   | not set  |    set    |
+                    | locality     | not set  |    set    |
+                    | subLocality  | not set  |    set    |
+                    | latitude     |    set   |    set    |
+                    | longitude    |    set   |    set    |
+                    | timezone     |    set   |  not set  |
+                    | country      |    set   |    set    |
+                    +--------------+----------+-----------+
+                */
+                if (self::ADDRESS_TYPE_PLACE !== $addressType) {
+                    $location->streetNumber = $address->getStreetNumber();
+                    $location->streetName   = $address->getStreetName();
+                    $location->subLocality  = $address->getSubLocality();
+                }
 
-            /*
-                               +----------+-----------+
-                               | geonames | nominatim |
-                +--------------+----------+-----------+
-                | streetNumber |    ?     |     ?     |
-                | streetName   | not set  |    set    |
-                | postalCode   | not set  |    set    |
-                | locality     | not set  |    set    |
-                | subLocality  | not set  |    set    |
-                | latitude     |    set   |    set    |
-                | longitude    |    set   |    set    |
-                | timezone     |    set   |  not set  |
-                | country      |    set   |    set    |
-                +--------------+----------+-----------+
-            */
-            if ('place' !== $addressType) {
-                $location->streetNumber = $address->getStreetNumber();
-                $location->streetName   = $address->getStreetName();
-                $location->subLocality  = $address->getSubLocality();
+                $location->postalCode       = $address->getPostalCode();
+                $location->locality         = $address->getLocality();
+                $location->timezone         = $address->getTimezone();
+                $location->country          = new \StdClass();
+                $location->country->isoCode = $address->getCountry()->getCode();
+
+                $location->coordinates            = new \StdClass();
+                $location->coordinates->latitude  = $address->getCoordinates()->getLatitude();
+                $location->coordinates->longitude = $address->getCoordinates()->getLongitude();
+
+                $adminLevels = $address->getAdminLevels();
+                $location->adminLevels = [];
+                foreach ($adminLevels as $adminLevel) {
+                    $adminLevelStdClass = new \StdClass();
+                    $adminLevelStdClass->level = $adminLevel->getLevel();
+                    $adminLevelStdClass->name  = $adminLevel->getName();
+                    $adminLevelStdClass->code  = $adminLevel->getCode();
+                    $location->adminLevels[] = $adminLevelStdClass;
+                }
+
+                $locations[] = $location;
+
+                $previousAddress = $address;
             }
-
-            $location->postalCode       = $address->getPostalCode();
-            $location->locality         = $address->getLocality();
-            $location->timezone         = $address->getTimezone();
-            $location->country          = new \StdClass();
-            $location->country->isoCode = $address->getCountry()->getCode();
-
-            $location->coordinates            = new \StdClass();
-            $location->coordinates->latitude  = $address->getCoordinates()->getLatitude();
-            $location->coordinates->longitude = $address->getCoordinates()->getLongitude();
-
-            $locations[] = $location;
         }
         return $locations;
     }

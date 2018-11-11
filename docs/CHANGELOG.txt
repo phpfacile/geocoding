@@ -1,0 +1,5 @@
+1.0.1
+------
+* EVOL Added support for locale + result filter
+  - Now the locale used can be passed with the query. NOTA Names in the result are in the given locale
+  - Now, by default, when performing a place query, the service attempt to remove unexpected results
