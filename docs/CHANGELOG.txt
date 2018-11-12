@@ -1,3 +1,5 @@
+* EVOL Add geocoding date time (UTC) in results
+
 1.0.1
 ------
 * EVOL Added support for locale + result filter

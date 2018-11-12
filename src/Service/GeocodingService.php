@@ -378,11 +378,16 @@ class GeocodingService
     {
         $locations = [];
 
+        // Here we assume webserver and database clocks are synchronized (usually it's OK as they are on the same server)
+        $now = new \DateTime('now', new \DateTimeZone('UTC'));
+
         $previousAddress = null;
 
         foreach ($addresses as $address) {
             $location = new \StdClass();
             $location->provider = $address->getProvidedBy();
+            $location->geocodingDateTimeUTC = $now->format('Y-m-d H:i:s');
+
             switch ($address->getProvidedBy()) {
                 case 'geonames':
                     $location->idProvider = $address->getGeonameId();
