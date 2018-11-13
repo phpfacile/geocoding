@@ -24,12 +24,16 @@ class GeocodingService
     /**
      * Array of instance of geocoder (ex: one for nomatim, onr for geonames, etc)
      *
-     * @var
+     * @var $geocoders
      */
     protected $geocoders = [];
 
-    // Retrieved from https://github.com/rupinder1133/country-codes-to-timezones-mapping/blob/master/cc%20to%20tz%20PHP.txt (no license defined and content validity not checked)
-    static $timeZoneByCountryCode = [
+    /**
+     * Retrieved from https://github.com/rupinder1133/country-codes-to-timezones-mapping/blob/master/cc%20to%20tz%20PHP.txt (no license defined and content validity not checked)
+     *
+     * @var $timeZoneByCountryCode
+     */
+    protected static $timeZoneByCountryCode = [
         'AD' => 'Europe/Andorra',
         'AE' => 'Asia/Dubai',
         'AF' => 'Asia/Kabul',
@@ -247,12 +251,18 @@ class GeocodingService
         'YT' => 'Indian/Mayotte',
         'ZA' => 'Africa/Johannesburg',
         'ZM' => 'Africa/Lusaka',
-        'ZW' => 'Africa/Harare'
+        'ZW' => 'Africa/Harare',
     ];
 
     /**
+     * Constructor
      *
-     * @param array $providersCfg Configuration for different providers
+     * @param array      $providersCfg Configuration for different providers
+     * @param string     $cacheDir     Full path to dir used at cache (must contain one dir per geocoder used)
+     * @param string     $locale       Default locale to be used
+     * @param HttpClient $httpClient   HttpClient to use
+     *
+     * @return GeocodingService
      */
     public function __construct($providersCfg, $cacheDir, $locale = 'fr', HttpClient $httpClient = null)
     {
@@ -260,7 +270,7 @@ class GeocodingService
             $httpClient = new Guzzle6HttpClient();
         }
 
-        $ttl = 30*24*3600;
+        $ttl = (30 * 24 * 3600);
 
         foreach ($providersCfg as $providerName => $providerCfg) {
             $provider = null;
@@ -275,34 +285,31 @@ class GeocodingService
                     break;
                 default:
                     throw new \Exception('Unmanaged provider ['.$providerName.']');
-
             }
-            $storage = StorageFactory::factory([
-                'adapter' => [
-                    'name' => 'filesystem',
-                    'options' => [
-                        'cache_dir' => $cacheDir.'/'.$providerName,
-                        'ttl' => $ttl,
-                    ]
-                ],
-                'plugins' => [
-                    'serializer',
-                    'exception_handler' => ['throw_exceptions' => true],
+
+            $storage = StorageFactory::factory(
+                [
+                    'adapter' => [
+                        'name'    => 'filesystem',
+                        'options' => [
+                            'cache_dir' => $cacheDir.'/'.$providerName,
+                            'ttl'       => $ttl,
+                        ],
+                    ],
+                    'plugins' => [
+                        'serializer',
+                        'exception_handler' => ['throw_exceptions' => true],
+                    ],
                 ]
-            ]);
+            );
 
-            // TODO Raise an exception (or automatically create dir if possible)
-            // if $cacheDir.'_'.$providerName doesn't exist or is not writable
-
-            // FIXME Nothing can be found in cache dir after test => Cache is not working
             $cache = new SimpleCacheDecorator($storage);
 
             // If storage doesn't support per item TTL then setting an item TTL
-            // will prevent any cache use :-/
-            // according to SimpleCacheDecorator implementation
-            $perItemTTL = null;
+            // will prevent any cache use :-/ according to SimpleCacheDecorator implementation
+            $perItemTTL   = null;
             $capabilities = $storage->getCapabilities();
-            if ($capabilities->getStaticTtl() && (0 < $capabilities->getMinTtl())) {
+            if ((true === $capabilities->getStaticTtl()) && (0 < $capabilities->getMinTtl())) {
                 $perItemTTL = $ttl;
             }
 
@@ -316,7 +323,9 @@ class GeocodingService
      * Returns location found by geocoding as an array of array of properties
      * common to all tested providers
      *
-     * @param string $address Full text address
+     * @param string $addressFull Full text address (ex: "Paris, France" or "Avenue des champs Elysées, Paris, France")
+     * @param string $locale      Locale (ex: 'fr', 'fr-FR' but not used)
+     * @param string $limit       Max nb of results to be returned
      *
      * @return StdClass[]
      */
@@ -332,6 +341,7 @@ class GeocodingService
         $query = GeocodeQuery::create($addressFull);
         $query = $query->withLocale($locale);
         $query = $query->withLimit($limit);
+
         $addresses = $this->geocoders[$preferredProvider]->geocodeQuery($query);
 
         return self::getGeocodedAdressesAsStdClassArray($addresses);
@@ -341,10 +351,12 @@ class GeocodingService
      * Returns location of places found by geocoding as an array of array of properties
      * common to all tested providers
      *
-     * @param string $countryName Name of the country
-     * @param string $placeName   Name of the place
-     * @param string $postalCode  Postal code (optionnal)
-     * @param string $locale      Locale (ex: 'fr', 'fr-FR' but not used)
+     * @param string  $countryName  Name of the country
+     * @param string  $placeName    Name of the place
+     * @param string  $postalCode   Postal code (optionnal)
+     * @param string  $locale       Locale (ex: 'fr', 'fr-FR' but not used)
+     * @param string  $limit        Max nb of results to be returned
+     * @param boolean $filterPlaces Whether or not to attempt to remove unexpected results (in case of places)
      *
      * @return StdClass[]
      */
@@ -361,19 +373,40 @@ class GeocodingService
         if (false === array_key_exists($preferredProvider, $this->geocoders)) {
             throw new \Exception('No '.$preferredProvider.' provider configured');
         }
+
         $query = GeocodeQuery::create($addressFull);
         $query = $query->withLocale($locale);
         $query = $query->withLimit($limit);
+
         $addresses = $this->geocoders[$preferredProvider]->geocodeQuery($query);
 
         return self::getGeocodedPlacesAsStdClassArray($addresses, $filterPlaces);
     }
 
+    /**
+     * Converts an array of geocoded addresses of places retrieved from a geocoder and convert it into
+     * an array of "normalized" StdClass
+     *
+     * @param Geocoder\Model\Address[] $addresses    Addresses of places
+     * @param boolean                  $filterPlaces Whether to try to remove unexpected addresses or not
+     *
+     * @return StdClass[]
+     */
     protected static function getGeocodedPlacesAsStdClassArray($addresses, $filterPlaces = true)
     {
         return self::getGeocodedAdressesAsStdClassArray($addresses, self::ADDRESS_TYPE_PLACE, $filterPlaces);
     }
 
+    /**
+     * Converts an array of geocoded addresses retrieved from a geocoder and convert it into
+     * an array of "normalized" StdClass
+     *
+     * @param Geocoder\Model\Address[] $addresses    Array of addresses
+     * @param string                   $addressType  Whether it is a "generic" self::ADDRESS_TYPE_LOCATION or a self::ADDRESS_TYPE_PLACE
+     * @param boolean                  $filterPlaces Whether to try to remove unexpected addresses or not
+     *
+     * @return StdClass[]
+     */
     protected static function getGeocodedAdressesAsStdClassArray($addresses, $addressType = self::ADDRESS_TYPE_LOCATION, $filterPlaces = true)
     {
         $locations = [];
@@ -384,7 +417,7 @@ class GeocodingService
         $previousAddress = null;
 
         foreach ($addresses as $address) {
-            $location = new \StdClass();
+            $location           = new \StdClass();
             $location->provider = $address->getProvidedBy();
             $location->geocodingDateTimeUTC = $now->format('Y-m-d H:i:s');
 
@@ -420,11 +453,13 @@ class GeocodingService
                                         $samePlace = false;
                                         break;
                                     }
+
                                     // Unfortunately adminLevel code is empty so we have to rely on name
                                     if ($adminLevel->getName() !== $previousAdminLevels->get($idx)->getName()) {
                                         $samePlace = false;
                                         break;
                                     }
+
                                     // If ever, adminLevel code is in fact set
                                     if ($adminLevel->getCode() !== $previousAdminLevels->get($idx)->getCode()) {
                                         $samePlace = false;
@@ -434,8 +469,11 @@ class GeocodingService
                             } else {
                                 $samePlace = false;
                             }
+
                             // If they are the same we only keep the previous one
-                            if (true === $samePlace) $ignoreAddress = true;
+                            if (true === $samePlace) {
+                                $ignoreAddress = true;
+                            }
                         }
                     }
 
@@ -443,7 +481,7 @@ class GeocodingService
                         $location->idProvider = $address->getOSMId();
                         $location->name       = $address->getDisplayName();
 
-                        $location->custom              = new \StdClass();
+                        $location->custom = new \StdClass();
                         $location->custom->attribution = $address->getAttribution();
                         $location->custom->class       = $address->getClass();
                         $location->custom->osmType     = $address->getOSMType();
@@ -456,7 +494,7 @@ class GeocodingService
 
             if (false === $ignoreAddress) {
                 /*
-                                   +----------+-----------+
+                    +              +----------+-----------+
                                    | geonames | nominatim |
                     +--------------+----------+-----------+
                     | streetNumber |    ?     |     ?     |
@@ -470,6 +508,7 @@ class GeocodingService
                     | country      |    set   |    set    |
                     +--------------+----------+-----------+
                 */
+
                 if (self::ADDRESS_TYPE_PLACE !== $addressType) {
                     $location->streetNumber = $address->getStreetNumber();
                     $location->streetName   = $address->getStreetName();
@@ -487,13 +526,14 @@ class GeocodingService
                 $location->coordinates->longitude = $address->getCoordinates()->getLongitude();
 
                 $adminLevels = $address->getAdminLevels();
+
                 $location->adminLevels = [];
                 foreach ($adminLevels as $adminLevel) {
-                    $adminLevelStdClass = new \StdClass();
+                    $adminLevelStdClass        = new \StdClass();
                     $adminLevelStdClass->level = $adminLevel->getLevel();
                     $adminLevelStdClass->name  = $adminLevel->getName();
                     $adminLevelStdClass->code  = $adminLevel->getCode();
-                    $location->adminLevels[] = $adminLevelStdClass;
+                    $location->adminLevels[]   = $adminLevelStdClass;
                 }
 
                 $locations[] = $location;
@@ -501,50 +541,62 @@ class GeocodingService
                 $previousAddress = $address;
             }
         }
+
         return $locations;
     }
 
     /**
      * Does the provider returns any timezone?
      *
+     * @param string $providerName Name (identifier) of the geocoder provider
+     *
      * @return boolean
      */
-     public function doProvideTimezone($providerName = null)
-     {
-         if (null === $providerName) {
-             $providerName = $this->geocoder->getProvider()->getName();
-         }
+    public function doProvideTimezone($providerName = null)
+    {
+        if (null === $providerName) {
+            $providerName = $this->geocoder->getProvider()->getName();
+        }
 
-         switch ($providerName) {
-             case 'nominatim':
+        switch ($providerName) {
+            case 'nominatim':
                 return false;
             default:
                 throw new \Exception('Unmanaged provider ['.$providerName.']');
-         }
-     }
+        }
+    }
 
-     /**
-      * Returns the time zone of the given location
-      *
-      * @param StdClass $country    StdClass with isoCode attribute
-      * @param string   $postalCode Postal code
-      * @param string   $location   Location name (ex; Paris)
-      *
-      * @return string  Timezone (ex: Europe/Paris)
-      */
-     public function getTimeZoneByCountryAndLocation($country, $postalCode, $location)
-     {
-         if (array_key_exists($country->isoCode, self::$timeZoneByCountryCode)) {
-             return self::$timeZoneByCountryCode[$country->isoCode];
-         }
+    /**
+     * Returns the time zone of the given location
+     *
+     * @param StdClass $country    StdClass with isoCode attribute
+     * @param string   $postalCode Postal code
+     * @param string   $location   Location name (ex; Paris)
+     *
+     * @return string  Timezone (ex: Europe/Paris)
+     */
+    public function getTimeZoneByCountryAndLocation($country, $postalCode, $location)
+    {
+        if (true === array_key_exists($country->isoCode, self::$timeZoneByCountryCode)) {
+            return self::$timeZoneByCountryCode[$country->isoCode];
+        }
 
-         // TODO Manage countries with several timezones
-         throw new \Exception('Unmanaged country isoCode ['.$country->isoCode.'] (either an invalid code or a country with several timezones)');
-     }
+        // TODO Manage countries with several timezones
+        throw new \Exception('Unmanaged country isoCode ['.$country->isoCode.'] (either an invalid code or a country with several timezones)');
+    }
 
-     public function completeWithMissingRequiredFields($locationStdClass, $requiredFields)
-     {
-        if (in_array('timezone', $requiredFields)) {
+    /**
+     * Checks whether required fields (such as timezone) is defined
+     * and complete them (if possible) if needed
+     *
+     * @param StdClass $locationStdClass Location as StdClass
+     * @param array    $requiredFields   List of required fields
+     *
+     * @return void
+     */
+    public function completeWithMissingRequiredFields($locationStdClass, $requiredFields)
+    {
+        if (true === in_array('timezone', $requiredFields)) {
             // Do our best to get the timezone (so as to be able to compute UTC datetime)
             if ((0 === strlen($locationStdClass->timezone))
                 && (false === $this->doProvideTimezone($locationStdClass->provider))
@@ -554,5 +606,5 @@ class GeocodingService
                 // FIXME Store zipcode provider ??
             }
         }
-     }
+    }
 }

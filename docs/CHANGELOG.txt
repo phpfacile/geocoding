@@ -1,3 +1,4 @@
+* FIX coding style
 * EVOL Add geocoding date time (UTC) in results
 
 1.0.1
